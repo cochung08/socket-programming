@@ -1,0 +1,182 @@
+CSE533
+Instructor Liu
+2015, Oct. 28
+
+Sun Lin
+Cheuk On Chung
+README
+
+Report, in a ReadMe file which you hand in with your code, on the modifications you
+had to introduce to ensure that only unicast addresses are bound:
+
+Method: Not to include the code of binding broadcasting address. When we are
+checking for all usable addresses, we simply don't store the broadcast address.
+Then we bind everything we have encountered so far.
+
+
+my implementation of the array of structures for:
+
+sockfd
+IP address bound to the socket
+network mask for the IP address
+subnet address (obtained by doing a bit-wise and between the IP address and its
+network mask)
+
+:
+
+struct Interface {
+
+	int sockFd;
+	char* address;
+	char* networkMask;
+	char* subnetAddress;
+
+};
+
+File transfer:
+
+ARQ sliding window implementation:
+The client has receiving buffer that stores all the incoming segments from the
+server. It stores them in a linked list data structure, and orders the segments
+in numerical order. If a new segment arrives, it will be inserted into the
+window in the correct location, if it doesn't exist. A counter is used to
+keep track of the number of segments in the window at all times. The number of
+segments cannot exceed the maximum declared by the user.
+Similarly, the server keeps a window for the segments that are outgoing. In
+particular, a timer is used to guard the first unACKed outgoing segment. When
+the timer goes off, the first segment in the window will be resent. A counter
+is also used to make sure the server is sending more than the max rate.
+
+Segment header:
+struct segment{
+        int sequence_num;
+        int ack_num;
+        char is_eof;
+        char is_probe;
+        char is_complete;
+        char is_resent;
+        int rwnd;
+        int timestamp;
+        char is_last_in_iter;
+        /* header is 21 bytes */
+        char payload[UDP_PAYLOAD_SIZE];
+};
+The sequence number is used to order the segments for the client to distinguish
+incoming segments. The ACK field is used by the client to request for the next
+segment it needs from the server. The EOF bit signifies that the current
+segment is the last segment carrying data. The PROBE bit is used for polling
+the client for a new request when the previous request has a rwnd of 0. The
+COMPLETE flag is sent by the client to the server, notifying it that it has
+received all the data segments. The RESENT flag notifies the client that the
+current segment has been sent previously, and this is a duplicate. The rwnd
+is the advertising window of the client, telling the server how many more
+segments it is allowed to hold. The timestamp is used by the server to measure
+the RTT of the segment. The LASTINITER bit tells the client that the current
+packet is the last of the packets that will be sent in the current iteration.
+This is used as follows: client sends a request with rwnd = 5, but the cwnd of
+the server is only 3. The client expects 5 segments, but the server is only
+able to send 3, we the client can stop Reading from socket at the 3 segment
+received. Finally, the payload is the data that the segment is carrying, which
+contains a total of 512 - 21 bytes.
+
+Flow control implementation:
+The rwnd field of the segment header advertises the amount of buffering the
+client can still account for. This value is determined by 2 factors: (1) the
+maximum size of the receiving window, and (2) the current number of segments
+that is already buffered. The rwnd is simply the difference between the 2
+numbers.
+
+Congestion control implementation:
+The "state machine" is imitated using a helper function get_cwd(). It modifies
+the parameters of the state machine, including an indicator of the current state,
+and some variables. The following are indicators of the stats in the state machine:
+1 - Slow Start
+2 - Congestion Avoidance
+3 - Fast Retransmit
+It compares the previously ACKed segment, and the current ACK of the newly
+received segment. If it was a duplicate (third duplicate), we transition into
+the fast retransmit state. If a new ACK arrives, we transition into the
+congestion avoidance state. If a timeout occurs, we reset it back to the
+slow start state. The cwnd, ssthresh and dupPacketCounter are modified to
+reflect the change in state.
+
+RTT and RTO implementation:
+All rto timers are within the range of 1000ms to 3000ms as described in the
+assignment specifications. The maximum times to transmit is 12, and the rto
+timer is doubled per retransmission. We used the following calculations:
+measuredRTT -= (srtt >> 3);
+srtt += measuredRTT;
+if (measuredRTT < 0) {
+	measuredRTT = -measuredRTT;
+}
+measuredRTT -= (rttvar >> 2);
+rttvar += measuredRTT;
+RTO = (srtt >> 3) + rttvar;
+
+if(RTO < RTTMIN * 1000){
+	RTO = RTTMIN * 1000;
+} else if(RTO > RTTMAX * 1000){
+	RTO = RTTMAX * 1000;
+}
+measuredRTT is computed by subtracting the time a packet ACK coming from the
+client minus the time the outgoing packet was sent using the timestamp field.
+srtt and rttvar are updated using a modified version of the code in the
+textbook, and RTO is ultimately updated. Integer calculations are used rather
+than floating point. Lastly, the value of RTO will be bounded on the range
+specified.
+
+Persistent timer implementation:
+When the server receives a segment with the rwnd field of 0 from the client,
+the server will not send anymore data segments. Instead, it will turn on the
+PROBE bit, which tells the client to advertise its rwnd again. The sending
+will resume when the new incoming segment has an rwnd that is greater than 0.
+
+Clean closing:
+The client will send a segment containing the COMPLETE bit. This tells the
+server that the client has received all the data it needs, and is waiting to
+be terminated. If the server sees this segment, it will decide to terminate. If
+this segment is lost, the client will enter a TIME_WAIT state.
+
+TIME_WAIT state:clean closing
+
+If the server receive the ack of last datagram from the client, it will stop.
+Otherwise, server keeps sending datagram to client.
+
+For the client, the client set up a timer after entering into time_wait state,
+And then we set a while loop. Within while loop, there is a blocking read function and send function.
+We made the timer 15 seconds using alarm. This is an arbitrary number to ensure
+that the server has received this last segment.
+
+To summarize:
+First, client will send last ask after it receives the whole file.
+If this ack get lost, the server will timeout and send another datagram.
+Then the read function of client will receive the datagram and
+tell the server again that client has received all the file content.
+
+When the timer goes off, the blocking read function will be disrupted by signal. And then client stops.
+
+Consumer thread:
+A thread is created to do the printing while the client continuously received
+data from the server. We used locks to protect the sliding window that is shared
+by both the client and thread.
+
+The sleeptime of the consumer thread uses the formula:
+-1 * mean * ln(random())
+The random function is determined as follows:
+while (random_value <= 0.000001) {
+	random_value = (double) rand() / (double) RAND_MAX;
+}
+We used a tolerance of 10^-6 to limit the sleeptime. This is also a guard
+against the random number returning 0.
+
+Compile and Execute:
+Compile using the Makefile and command "make." The server can be executed using
+the command "./udpsrv" and likewise "./udpcli" for the client. The client and
+server reads the parameters from 2 files called "client.in" and "server.in"
+respectively. Make sure that those files exist, and contain valid information.
+
+The IP addresses and port numbers should be chosen carefully. The filename
+contains the request of the client for the server. The receiving and sending
+window sizes should be greater than 0 in both. The seed can be any value.
+The probability of loss should be between 0 and 1 inclusive. A good value for
+mean is in the order of 10^2 and 10^3.

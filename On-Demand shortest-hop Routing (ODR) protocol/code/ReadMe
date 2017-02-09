@@ -1,0 +1,200 @@
+Sun Lin		108674057
+Cheuk On CHUNG  110386696
+
+
+CSE 533
+Instructor Liu
+Assignment 3
+
+upload:
+
+scp -P 130 get_hw_addrs.c hw_addrs.h server_chechung.c client_chechung.c odr_chechung.c odr.h function.h function.c Makefile chechung@minix.cs.stonybrook.edu:~/cse533
+
+
+make
+
+then deploy following file: odr_chechung client_chechung server_chechung
+
+then run:
+<./odr_chechung> <time>
+
+./odr_chechung 60
+./odr_chechung 10
+./client_chechung
+./server_chechung
+
+test case: 
+
+****************************************************************************************
+1.test for route discovery, forced discovery,timeout, retransmit
+
+run odr in vm1,vm3,vm4,vm5
+run client in vm1
+run server in vm5
+
+
+first in client ,enter vm5, then enter 0. Then we will get timestamp from server
+then  in client ,enter vm5, then enter 1. Then we will force a new discover and then recieve timestamp from server( forced rediscover)
+
+then in client, enter vm6, then enter 0. Then you will see timeout.
+then in client ,enter vm5, then enter 0. Then we will get timestamp from server (which shows our program will not crash by the timeout)
+
+then turn off odr in vm4
+then in client, enter vm5, then enter 0. Then you will see timeout and retransimit(path through vm4 is broken. so it discovered a new path to vm5 through vm3)
+
+if you cannot see the timeout, that means the route path didnt not choose vm4 but vm3. 
+then do the following to test timeout and retransmit
+turn on odr in vm4, turn off odr in vm3.
+then in client, enter vm5, then enter 0. Then you will see timeout and retransimit(path through vm3 is broken. so it discovered a new path to vm5 through vm4)
+
+
+
+
+
+2. test for packet buffering
+
+run odr in vm6,vm9,vm10
+run client in vm6
+run server in vm10
+
+first in client, enter vm10, then enter 0. Route will be found and response will be received from server
+then close the odr running at vm9, re-run it again
+in client, enter vm10, then enter 0. It should be working.
+
+****************************************************************************************
+
+
+
+
+*********************************************************************************
+major designs and decisions
+
+server
+the server keeps waiting for request after it starts.  Right after it receives request, the msg_send function will send the timestamp to the odr in server. Here we put the msg_send function inside the msg_recv function so that the msg_send can directly access address,port number and message received from the msg_recv.
+
+client:
+
+We use alarm(2) to set a timer to msg_recv. we‘wrap’ the call to msg_recv in a timeout
+
+
+
+odr:
+
+The odr program requires a an extra integer argument that represents the staleness parameter 
+of a routing entry. You run the program as follows:
+./odr2 30
+where 30 means the 30 seconds. odr cannot run without a valid staleness parameter.
+The broadcast_id is stored in this program, and contains an initial value of 0. Each time 
+the odr cannot find a path to the destination, it creates an RREQ with the next available 
+broadcast_id value. For example, the first request will have the id of 1, and the next 
+is 2, etc. odr cannot keep track of the last broadcast_id used if it has been shutted down 
+by the user.
+
+When an odr receives a type 2 message packet, it will always buffer that in our output 
+buffer. In every iteration, the program checks if we have a valid path to the buffered 
+packet's destination. If we do, we remove the packet from the buffer, and send it out 
+to the next hop, else, we create a new RREQ to find a route.
+
+We are working with 2 types of sockets, and we call select() on them to determine what kind 
+of information we should relay. If we receive from a UNIX domain socket, it must be a type 
+2 message. If we have a route, then we should send it out. Otherwise, an RREQ message would 
+be formulated and sent. This packet will be sent after a route has been discovered.
+
+If we receive from a PF packet socket, then we have 3 choices depending on the message type 
+we receive. Consider the following:
+Type 0 (RREQ) - If the packet contains a "newer" broadcast_id, and it contains the forced 
+discovery flag, then we will update the reverse path. Otherwise, this path will only update 
+if we found a better route than we currently have. If the receiving odr is not the destination, 
+then it will forward the packet to the next hop. If it has a route to the destination, then 
+instead, it will send an RREP, unless the forced discovery flag is set. If the receiving odr 
+is the destination node, then it will respond with an RREP. For both cases, if the receiving 
+node has never seen the source node before, or if a better route is discovered, then it 
+will broadcast the original message.
+Type 1 (RREP) - We should update the forward path if the we don't already have one, the 
+path is stale, we found a better route, or the message contains the forced discovery 
+flag. If the current node is an intermediate node, it just relays the RREP back to the 
+original source. If the current node is the destination, then it will start to send a 
+packet that it has buffered, if applicable.
+Type 2 (App. Message) - We have 2 types of type 2 messages: (1) client request, and (2) server 
+response. The client request have the payload message of "request time." If an odr node 
+receives such message, then it will contact the server, to stimulate a response. The server, 
+if running, will send back the current datetime. odr then creates a new packet containing the 
+server response, and attempts to send it back to the client. The client will pick up this 
+type 2 message, and finds that the payload doesn't contain the string "request time." It knows 
+that the message should be relayed to the client. The client and server processes communicate 
+with odr using UNIX domain sockets.
+
+If a route is discovered between 2 nodes, then type 2 messages will be sent without extra 
+processing. However, is the link in between breaks (i.e. odr in the middle reboots), then 
+this should be handled. The source node will send the packet since it does not know an odr 
+has been resetted. When the resetted node receives the packet, it does not know where to 
+send it to. Therefore, it would initiate a RREQ to find the route. The type 2 message will 
+stay in the buffer until a route has been found.
+
+
+***********************************************
+typedef struct map_port_path {
+    int portNum;
+    char sun_path[108];
+
+}Map_port_path;
+
+we define such data type to save the relationship between sun_path and port numbers.
+And we use an array to store such relationship.
+***********************************************
+
+
+
+*************************************************
+payload of pf packet:
+
+typedef struct sELF_DEFINED_PF_Packet {
+	int type; //4 byte
+	char source_ipAddr[IPAddr_SIZE]; //20 byte
+	int source_port; //4 byte
+	char destination_ipAddr[IPAddr_SIZE]; //20 byte
+	int destination_port; //4 byte
+	int hop_count; //4 byte
+	char application_msg[DATA_SIZE];
+} SELF_DEFINED_PF_Packet;
+
+
+*************************************************
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ 
+
